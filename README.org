@@ -1,0 +1,151 @@
+#+TITLE: SGP4 satellite orbit propagation model in Common Lisp
+#+AUTHOR: Mayes Mullins
+#+STARTUP: showall
+
+* INTRODUCTION
+
+The most common model used to determine the positions of Earth orbiting satellites uses a version of
+the Simplified General Perturbations theory and is referred to as SGP4.  Satellite orbit data in a
+form suitable for use with SGP4 is provided by NORAD.  Data in this form are called two-line-element
+(TLE) sets because all the information for one satellite fits onto two 69 character lines of text in a
+well-defined format.
+
+Determining the position of a satellite at a given time using SGP4 involves the following steps:
+1. obtaining the TLE data set for the satellite
+2. translating the information from the TLE set into the form that the SGP4 model requires as input
+3. running the SGP4 model to determine the satellite position at the desired time
+
+For step 1, TLE data for many satellites are available from a number of sites on the Internet.
+Search for 'satellite tle', for example.  Elements are typically updated every day or few days.
+
+The code here performs steps 2 and 3.  It is organized as follows:
+
+- system "=CL-SGP4=" with package "=CL-SGP4=" includes the following 3 files:
+ * =tle.lisp= contains code to do the TLE translation
+ * =sgp4.lisp= contains the SGP4 code
+ * =astrometry.lisp= contains some angle and time utilities to support the other two and to support
+   possible further processing of the data
+- system "=TEST-CL-SGP4=" with package "=TEST-CL-SGP4=" in the =test= subdirectory contains some
+  validation functions and sample code.
+
+The package docstring in file =test/packages.lisp= and the function docsctrings in
+=test/test-cl-spg4.lisp= contain some description of the "=TEST-CL-SGP4=" system.  The description
+here concentrates on the "=CL-SGP4=" system.
+
+* EXAMPLE
+
+A simple example, which starts from a TLE data set and generates state at a few times, is the
+following (see the description after the code):
+
+#+BEGIN_SRC lisp -n
+(use-package '("CL-SGP4"))
+(let ((tledata
+       (make-tledata-from-lines
+        "1 00005U 58002B   00179.78495062  .00000023  00000-0  28098-4 0  4753"
+        "2 00005  34.2682 348.7242 1859667 331.7664  19.3264 10.82419157413667"))
+      (v-grav (make-v-grav-wgs-72)))
+  (multiple-value-bind (t50 v-el0 Bstar) (tledata->t50-v-el0-Bstar tledata)
+    (let ((sgp4data (init-sgp4 v-grav t50 v-el0 Bstar)))
+      (format t "~10@a  ~10@a~10@a~10@a  ~10@a~10@a~10@a~%"
+              "TIME [min]" "X [km]" "Y [km]" "Z [km]"
+              "VX [km/s]" "VY [km/s]" "VZ [km/s]")
+      (loop
+         for time from 0.0d0 to 360.0d0 by 60.0d0
+         for v-state-km-s = (->v-state-km-s (propagate-sgp4 sgp4data time))
+         do (format t "~10,3f  " time)
+           (loop for i from 0 below 3
+              do (format t "~10,3f" (aref v-state-km-s i)))
+           (format t "  ")
+           (loop for i from 3 below 6
+              do (format t "~10,6f" (aref v-state-km-s i)))
+           (format t "~%")))))
+#+END_SRC
+==>
+#+BEGIN_EXAMPLE
+TIME [min]      X [km]    Y [km]    Z [km]   VX [km/s] VY [km/s] VZ [km/s]
+     0.000    7022.465 -1400.083     0.040    1.893841  6.405894  4.534807
+    60.000   -8198.270  5546.905  2599.068   -3.294076 -3.582922 -2.838099
+   120.000    3440.260 -5392.716 -3130.052    6.779784  3.219443  3.073935
+   180.000   -4822.185  7616.457  4416.257   -5.244256 -1.597247 -1.788972
+   240.000   -2348.446 -6072.670 -4375.089    7.321877 -1.352381  0.116466
+   300.000    -326.336  7869.918  5198.199   -6.097320  1.048616 -0.159215
+   360.000   -7154.031 -3783.177 -3536.194    4.741887 -4.151818 -2.093935
+#+END_EXAMPLE
+
+A =TLEDATA= structure contains the information extracted from the TLE text lines for one
+satellite. Function =MAKE-TLEDATA-FROM-LINES= (line 3 above) can be used to make a =TLEDATA=
+structure from two strings containing the two lines.  The =TLEDATA= structure can be treated as an
+opaque object by the user.  It is never altered by the code here once it is created.
+
+The SGP4 algorithm itself is separated into an initialization phase and a propagation phase.  The
+initialization phase does work which needs to be done only once for a given satellite orbit and
+which depends only on the TLE data and on some parameters describing the Earth's gravity field.
+The propagation phase makes use of the data generated during initialization and calculates where
+the satellite will be at a given time.  The code here makes the same distinction:
+- function =INIT-SGP4= (line 8) creates an =SGP4DATA= structure object which contains the data
+  generated during initialization
+- function =PROPAGATE-SGP4= (line 14) takes this object and a time and returns the satellite state,
+  i.e., position and velocity, at that time.
+
+These are both pure functions.  Like the =TLEDATA= structure, the =SGP4DATA= structure can also be
+treated as an opaque, immutable object by the user.
+
+Function =INIT-SGP4= (line 8) takes 4 arguments:
+- =V-GRAV= is the output from one of the =MAKE-V-GRAV-xxx= functions (see below).
+- =T50= is the TLE epoch time in days after 1950.0, i.e., the time from which the orbital elements
+  are referenced.
+- =V-EL0= is the orbital elements vector at epoch as specified by the TLE.
+- =BSTAR= is the TLE B-star drag parameter for the satellite.
+
+Function =TLEDATA->T50-V-EL0-BSTAR= can be used to generate =T50=, =V-EL0= and =BSTAR= from a
+=TLEDATA= structure.
+
+Functions =MAKE-V-GRAV-xxx= each take no arguments and return a vector with 5 elements which
+describe the Earth's gravity field at the precision used by SGP4.  The slightly different values
+represent different snapshots of accuracy from different eras of SGP4 modelling:
+- =MAKE-V-GRAV-WGS-72-LOW-PRECISION= returns the values used in the original Spacetrack Report #3
+  (reference STR3 -- see references section in file =NOTES.org=).
+- =MAKE-V-GRAV-WG2-72= (line 6) returns slightly updated and more consistent values, and is the
+  default used by reference Vallado2006 and by the test cases to which the performance of the code
+  here has been matched.
+- =MAKE-V-GRAV-WGS-84= returns slightly different, more modern values.
+
+Once the =SGP4DATA= object has been created it can be used in the propagation function
+=PROPAGATE-SGP4= (line 14).  This takes 2 arguments:
+- the =SGP4DATA= object,
+- a time in minutes after the epoch of the TLE.  =PROPAGATE-SGP4= returns a state vector, [x y z vx
+  vy vz], giving the satellite's position and velocity in the canonical units used by the SGP4
+  algorithm (Earth radii and minutes) at that time.
+
+Functions =->V-STATE-KM-S= (line 14) and =->V-STATE-M-S= can be used to convert the state vector
+from canonical units to km, km/s and m, m/s units, respectively.  This conversion depends slightly
+on the v-grav parameters that were used.  If the default ones (WGS-72) were not used and 6-figure
+accuracy is really needed, macro =WITH-V-GRAV-UNITS= can be used to set the conversions
+appropriately.  There are also functions to extract just the location 3-vector and just the
+velocity 3-vector in one of these unit systems from the canonical units state vector.
+
+To a first approximation, state vectors can be said to be in an Earth-centered-inertial coordinate
+system.  This is a system with origin at the center of the Earth, Z along the Earth's axis pointing
+out the north pole, and X pointing towards the point on the celestial sphere at right ascension and
+declination 0, 0.  Actually, there are a variety of subtleties associated with coordinate systems if
+the greatest accuracy is desired.  For example, polar motion and Earth nutation should be accounted
+for.  See Vallado2006 for more details.  For casual observation, however, where accuracies on the
+order of 1 km is desired, these effects should be negligible.
+
+As an alternative to the use of =MAKE-TLEDATA-FROM-LINES= to process individual TLEs, file
+=tle.lisp= also contains function =READ-TLEDATA-FILE= which can be used to read a data file
+containing multiple two-line element data sets in the format typically used for supplying these
+elements.  This format actually uses *three* lines per satellite, where the first line is a
+comment-like text descriptor for the satellite, and the subsequent two lines contain the actual
+TLE.  =READ-TLEDATA-FILE= produces an alist with pairs whose car is the satellite description
+string and whose cdr is the =TLEDATA= structure for the satellite.  User-written code can index and
+process this alist as desired.  An example is in function =TLE-FILE-EXAMPLE= in package
+"=TEST-CL-SGP4=".
+
+* CODE DESCRIPTION AND VALIDATION
+
+See file NOTES.org for a description of the coding approach and some validation results.
+
+* LICENSE
+
+MIT.  See file =LICENSE=, which should have been provided.
